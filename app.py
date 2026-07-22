@@ -1,18 +1,6 @@
 import streamlit as st
-import io, zipfile, copy, re
-import xml.etree.ElementTree as ET
+import io, zipfile, re
 from openpyxl import load_workbook
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Namespaces
-# ─────────────────────────────────────────────────────────────────────────────
-NS_SS  = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-NS_A   = "http://schemas.openxmlformats.org/drawingml/2006/main"
-NS_XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
-
-ET.register_namespace("xdr", NS_XDR)
-ET.register_namespace("a",   NS_A)
-ET.register_namespace("",    NS_SS)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Leer datos_entrada.xlsx
@@ -20,124 +8,103 @@ ET.register_namespace("",    NS_SS)
 def leer_datos(f):
     wb = load_workbook(f, data_only=True)
     ws = wb["DATOS_PROYECTO"]
-
     def v(ref):
         val = ws[ref].value
         return str(val).strip() if val not in (None, "") else ""
-
     return {
-        "num_rev":         v("B2"),   # 00, 01, 02…
-        "titulo_doc":      v("B4"),   # Título del documento
-        "cod_rev_general": v("B5"),   # Código de Revisión General  ej: MI-TTT-SSTA-02-YYY-HRC-GE_YYY-0014-S00
-        "clave_ref":       v("B6"),   # Clave de referencia
-        "cod_documento":   v("B7"),   # Código del documento
-        "originador":      v("B8"),   # Originador
-        "entidad_rev":     v("B9"),   # Entidad Revisora
-        "fecha_ciclo":     v("B12"),  # Fecha revisor respondió
+        "num_rev":         v("B2"),
+        "titulo_doc":      v("B4"),
+        "cod_rev_general": v("B5"),
+        "clave_ref":       v("B6"),
+        "cod_documento":   v("B7"),
+        "originador":      v("B8"),
+        "entidad_rev":     v("B9"),
+        "fecha_ciclo":     v("B12"),
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers XML
+# ESTRATEGIA: todas las modificaciones son STRING REPLACE sobre XML crudo.
+# NO usamos ET para serializar — ET renombra namespaces (xdr→ns0, a→ns1)
+# y Excel no reconoce el archivo resultante.
 # ─────────────────────────────────────────────────────────────────────────────
+
 def get_sheet_map(files):
-    wb_root = ET.fromstring(files["xl/workbook.xml"].decode("utf-8"))
-    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-    return {sh.get("name"): i for i, sh in
-            enumerate(wb_root.findall(f".//{{{ns}}}sheet"), start=1)}
+    """Lee workbook.xml con regex para no depender de ET."""
+    wb_xml = files["xl/workbook.xml"].decode("utf-8")
+    sheets = re.findall(r'<sheet\s+name="([^"]+)"[^/]*/>', wb_xml)
+    return {name: i+1 for i, name in enumerate(sheets)}
 
 def get_drawing_path(files, sheet_num):
-    rels_path = f"xl/worksheets/_rels/sheet{sheet_num}.xml.rels"
-    if rels_path not in files:
+    rpath = f"xl/worksheets/_rels/sheet{sheet_num}.xml.rels"
+    if rpath not in files:
         return None
-    rels_root = ET.fromstring(files[rels_path].decode("utf-8"))
-    ns_r  = "http://schemas.openxmlformats.org/package/2006/relationships"
-    tipo  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
-    for rel in rels_root.findall(f"{{{ns_r}}}Relationship"):
-        if rel.get("Type") == tipo:
-            return rel.get("Target").replace("../", "xl/")
+    rels  = files[rpath].decode("utf-8")
+    match = re.search(
+        r'Type="[^"]*relationships/drawing"[^>]*Target="([^"]+)"', rels)
+    if match:
+        return match.group(1).replace("../", "xl/")
     return None
 
-# ── Drawing: actualizar runs de un textbox manteniendo estilos ────────────────
-def actualizar_textbox(drawing_xml_str, shape_name, nuevos_runs):
-    root  = ET.fromstring(drawing_xml_str)
-    found = False
-
-    for anchor in root.findall(f"{{{NS_XDR}}}twoCellAnchor"):
-        sp = anchor.find(f"{{{NS_XDR}}}sp")
-        if sp is None:
-            continue
-        cNvPr = sp.find(f".//{{{NS_XDR}}}cNvPr")
-        if cNvPr is None or cNvPr.get("name") != shape_name:
-            continue
-        txBody = sp.find(f"{{{NS_XDR}}}txBody")
-        if txBody is None:
-            continue
-
-        parrafos  = txBody.findall(f"{{{NS_A}}}p")
-        primer_p  = parrafos[0] if parrafos else None
-        runs_orig = primer_p.findall(f"{{{NS_A}}}r") if primer_p else []
-        rprs      = [r.find(f"{{{NS_A}}}rPr") for r in runs_orig]
-        endPr     = primer_p.find(f"{{{NS_A}}}endParaRPr") if primer_p else None
-
-        for p in parrafos:
-            txBody.remove(p)
-
-        p_new = ET.SubElement(txBody, f"{{{NS_A}}}p")
-        for i, texto in enumerate(nuevos_runs):
-            r_new   = ET.SubElement(p_new, f"{{{NS_A}}}r")
-            rpr_src = rprs[i] if i < len(rprs) else (rprs[-1] if rprs else None)
-            if rpr_src is not None:
-                r_new.append(copy.deepcopy(rpr_src))
-            t_el = ET.SubElement(r_new, f"{{{NS_A}}}t")
-            t_el.text = texto
-            if texto != texto.strip():
-                t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-
-        if endPr is not None:
-            p_new.append(copy.deepcopy(endPr))
-
-        found = True
-        break
-
-    return ET.tostring(root, encoding="unicode", xml_declaration=False), found
-
-# ── Sheet XML: actualizar oddHeader ──────────────────────────────────────────
-def actualizar_header(sheet_xml_str, cod_rev_general, num_rev):
+# ── PORTADA: modificar el último <a:t> dentro de CuadroTexto 4 ───────────────
+def actualizar_titulo_portada(drawing_bytes, nuevo_titulo):
     """
-    Reemplaza en oddHeader:
-      - El código de documento completo (todo antes de \nRev.)
-      - La revisión (S00, S01…)
-    Formato original:
-      &L&G&R&9No. Doc. MI-TTT-SSTA-02-YYY-HRC-GE_YYY-0014 \nRev. S00\n...
+    Reemplaza el último run de texto dentro de CuadroTexto 4.
+    Opera sobre el XML crudo sin parsear con ET.
     """
-    root = ET.fromstring(sheet_xml_str)
-    hf   = root.find(f"{{{NS_SS}}}headerFooter")
-    if hf is None:
-        return ET.tostring(root, encoding="unicode", xml_declaration=False), False
+    xml = drawing_bytes.decode("utf-8")
 
-    oh = hf.find(f"{{{NS_SS}}}oddHeader")
-    if oh is None or oh.text is None:
-        return ET.tostring(root, encoding="unicode", xml_declaration=False), False
+    # Extraer el bloque del shape CuadroTexto 4
+    match = re.search(r'name="CuadroTexto 4".*?</xdr:sp>', xml, re.DOTALL)
+    if not match:
+        return drawing_bytes, False
 
-    original = oh.text
+    shape_original = match.group(0)
 
-    # Extraer la parte del código: todo lo que hay entre "No. Doc. " y "\n"
-    # y reemplazar con cod_rev_general (sin el sufijo -S00 ya que va separado)
-    # El código de revisión general puede venir como "MI-...-S00" o sin sufijo
-    # En el header aparece sin el sufijo de revisión: "MI-TTT-SSTA-02-YYY-HRC-GE_YYY-0014"
-    # Separamos: código base = todo hasta el último "-S" o directamente el campo
-    cod_base = re.sub(r'-S\d+$', '', cod_rev_general)  # quitar -S00 si viene incluido
-    rev_str  = f"S{num_rev.zfill(2)}"
+    # Encontrar todos los textos <a:t>...</a:t> en el shape
+    textos = re.findall(r'<a:t>([^<]*)</a:t>', shape_original)
+    if not textos:
+        return drawing_bytes, False
 
-    # Patrón: "No. Doc. XXXX \nRev. SYY"
-    nuevo = re.sub(
-        r'(No\. Doc\. )([^\n]+)(\nRev\. )(S\d+)',
-        lambda m: f"{m.group(1)}{cod_base} {m.group(3)}{rev_str}",
-        original
+    # El último texto es el título del documento
+    titulo_actual = textos[-1]
+
+    # Escapar el título nuevo para XML
+    titulo_escapado = (nuevo_titulo
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;"))
+
+    # Reemplazar solo dentro del shape (última ocurrencia del último texto)
+    shape_nuevo = shape_original.replace(
+        f"<a:t>{titulo_actual}</a:t>",
+        f"<a:t>{titulo_escapado}</a:t>",
+        1
     )
 
-    oh.text = nuevo
-    return ET.tostring(root, encoding="unicode", xml_declaration=False), (nuevo != original)
+    xml_nuevo = xml[:match.start()] + shape_nuevo + xml[match.end():]
+    return xml_nuevo.encode("utf-8"), True
+
+# ── HEADER DE PÁGINA: CR+LF reales en el oddHeader ───────────────────────────
+def actualizar_odd_header(sheet_bytes, cod_rev_general, num_rev):
+    """
+    Formato del oddHeader:
+      No. Doc. MI-TTT-SSTA-02-YYY-HRC-GE_YYY-0014 \r\nRev. S00
+    donde \r\n son CR+LF reales.
+    """
+    xml_str  = sheet_bytes.decode("utf-8")
+    cod_base = re.sub(r"-S\d{2}$", "", cod_rev_general).strip()
+    rev_str  = "S" + num_rev.zfill(2)
+
+    patron = re.compile(
+        r"(No\.[ ]Doc\.[ ])([^ \r\n]+)([ ]+)(\r\n)(Rev\.[ ])(S\d{2})"
+    )
+    nueva, n = patron.subn(
+        lambda m: (m.group(1) + cod_base + m.group(3) +
+                   m.group(4) + m.group(5) + rev_str),
+        xml_str
+    )
+    return nueva.encode("utf-8"), n > 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -145,14 +112,14 @@ def actualizar_header(sheet_xml_str, cod_rev_general, num_rev):
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Generador HRC", page_icon="📋", layout="centered")
 st.title("📋 Generador HRC — Paso 1: Portada")
-st.caption("Modifica la portada: título en el cuadro de texto y código en el header de página.")
+st.caption("Modifica el título (CuadroTexto 4) y el header de página en Portada y Control de Firmas.")
 
 st.divider()
-col1, col2 = st.columns(2)
-with col1:
+c1, c2 = st.columns(2)
+with c1:
     st.markdown("**1 · Excel de datos**")
     f_datos = st.file_uploader("datos_entrada.xlsx", type=["xlsx"], key="datos")
-with col2:
+with c2:
     st.markdown("**2 · Plantilla HRC**")
     f_plantilla = st.file_uploader("plantilla_HRC.xlsx", type=["xlsx"], key="plantilla")
 
@@ -162,101 +129,91 @@ if f_datos:
         datos = leer_datos(f_datos)
         st.divider()
         st.subheader("Datos leídos")
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
-            for lbl in ["Revisión", "Título doc", "Cód. revisión gral", "Clave ref",
-                        "Cód. documento", "Originador", "Entidad revisora", "Fecha ciclo"]:
-                st.markdown(lbl)
-        with col_b:
-            for key in ["num_rev","titulo_doc","cod_rev_general","clave_ref",
-                        "cod_documento","originador","entidad_rev","fecha_ciclo"]:
-                st.code(datos[key] or "(vacío)")
-
-        vacios = [k for k in ["titulo_doc","cod_rev_general","num_rev"] if not datos[k]]
+        ca, cb = st.columns([1, 2])
+        labels = ["Revisión","Título doc","Cód. revisión gral","Clave ref",
+                  "Cód. documento","Originador","Entidad revisora","Fecha ciclo"]
+        keys   = ["num_rev","titulo_doc","cod_rev_general","clave_ref",
+                  "cod_documento","originador","entidad_rev","fecha_ciclo"]
+        with ca:
+            for l in labels: st.markdown(l)
+        with cb:
+            for k in keys:   st.code(datos[k] or "(vacío)")
+        vacios = [k for k in ["num_rev","titulo_doc","cod_rev_general"] if not datos[k]]
         if vacios:
-            st.warning(f"⚠️  Campos vacíos en datos_entrada: {', '.join(vacios)}")
+            st.warning(f"⚠️  Campos vacíos: {', '.join(vacios)}")
     except Exception as e:
         st.error(f"Error leyendo datos_entrada.xlsx: {e}")
 
 st.divider()
-
-with st.expander("📌 ¿Qué se va a modificar?", expanded=True):
+with st.expander("📌 Qué se modifica en este paso", expanded=True):
     st.markdown("""
-**Hoja `1. PORTADA (3)`**
-
-| Elemento | Ubicación | Campo origen | Acción |
-|----------|-----------|-------------|--------|
-| Header de página (arriba) | `oddHeader` en sheet1.xml | `B5` Cód. revisión gral + `B2` Revisión | ✅ Se actualiza |
-| Título del documento | `CuadroTexto 4` run 3 — drawing1.xml | `B4` Título | ✅ Se actualiza |
-| Header descriptivo largo | `CuadroTexto 3` — drawing1.xml | — | ❌ No se toca |
-
-**Hoja `2. CONTROL DE FIRMAS (2)`**
-
-| Elemento | Ubicación | Campo origen | Acción |
-|----------|-----------|-------------|--------|
-| Header de página (arriba) | `oddHeader` en sheet2.xml | `B5` + `B2` | ✅ Se actualiza |
+| Hoja | Elemento | Campo origen | Acción |
+|------|----------|-------------|--------|
+| `1. PORTADA` | Header de página (`No. Doc. / Rev.`) | `B5` + `B2` | ✅ Se actualiza |
+| `1. PORTADA` | `CuadroTexto 4` — último run (título) | `B4` | ✅ Se actualiza |
+| `2. CONTROL DE FIRMAS` | Header de página (`No. Doc. / Rev.`) | `B5` + `B2` | ✅ Se actualiza |
+| `1. PORTADA` | `CuadroTexto 3` (descripción larga) | — | ❌ No se toca |
 """)
 
-generar = st.button(
-    "⚡ Generar — portada + headers",
-    disabled=(not f_datos or not f_plantilla or datos is None),
-    type="primary"
-)
+generar = st.button("⚡ Generar — portada + headers",
+                    disabled=(not f_datos or not f_plantilla or datos is None),
+                    type="primary")
 
 if generar and datos and f_plantilla:
     try:
         f_plantilla.seek(0)
-        with zipfile.ZipFile(io.BytesIO(f_plantilla.read()), "r") as zin:
+        raw = f_plantilla.read()
+
+        with zipfile.ZipFile(io.BytesIO(raw), "r") as zin:
+            infos = {item.filename: item for item in zin.infolist()}
             files = {name: zin.read(name) for name in zin.namelist()}
 
         sheet_map = get_sheet_map(files)
-        log = []
-        num_rev = datos["num_rev"].zfill(2)
+        num_rev   = datos["num_rev"].zfill(2)
+        log       = []
 
-        # ── 1. CuadroTexto 4 en drawing de PORTADA ───────────────────────────
-        portada_sheet = next((s for s in sheet_map if "PORTADA" in s.upper()), None)
-        if portada_sheet:
-            snum         = sheet_map[portada_sheet]
-            drawing_path = get_drawing_path(files, snum)
-            if drawing_path and drawing_path in files:
-                drawing_xml = files[drawing_path].decode("utf-8")
-                runs_nuevos = [
-                    "Supervisión de Sistemas de Señalizacion Ferroviaria, Telecomunicaciones y Control",
-                    ":: Tren",
-                    " México-Querétaro-Irapuato  ",
-                    datos["titulo_doc"] or "Ingeniería Conceptual Casetas Técnicas",
-                ]
-                drawing_xml, found = actualizar_textbox(drawing_xml, "CuadroTexto 4", runs_nuevos)
-                files[drawing_path] = drawing_xml.encode("utf-8")
-                log.append(f"{'✅' if found else '⚠️ '} CuadroTexto 4 → '{datos['titulo_doc']}'")
+        # ── 1. Título en CuadroTexto 4 (drawing de la portada) ───────────────
+        portada = next((s for s in sheet_map if "PORTADA" in s.upper()), None)
+        if portada:
+            snum  = sheet_map[portada]
+            dpath = get_drawing_path(files, snum)
+            if dpath and dpath in files:
+                titulo = datos["titulo_doc"] or "Ingeniería Conceptual Casetas Técnicas"
+                new_bytes, found = actualizar_titulo_portada(files[dpath], titulo)
+                files[dpath] = new_bytes
+                log.append(f"{'✅' if found else '⚠️ shape no encontrado'} "
+                           f"CuadroTexto 4 → '{titulo}'")
+            else:
+                log.append("⚠️  Drawing de portada no encontrado")
+        else:
+            log.append("⚠️  Hoja PORTADA no encontrada")
 
         # ── 2. oddHeader en PORTADA y CONTROL DE FIRMAS ───────────────────────
-        hojas_con_header = [s for s in sheet_map
-                            if "PORTADA" in s.upper() or "CONTROL" in s.upper() or "FIRMA" in s.upper()]
-
-        for sname in hojas_con_header:
-            snum       = sheet_map[sname]
-            sheet_path = f"xl/worksheets/sheet{snum}.xml"
-            if sheet_path not in files:
+        hojas_hdr = [s for s in sheet_map
+                     if "PORTADA" in s.upper() or "CONTROL" in s.upper() or "FIRMA" in s.upper()]
+        for sname in hojas_hdr:
+            snum  = sheet_map[sname]
+            spath = f"xl/worksheets/sheet{snum}.xml"
+            if spath not in files:
                 continue
-            sheet_xml = files[sheet_path].decode("utf-8")
-            sheet_xml, changed = actualizar_header(
-                sheet_xml, datos["cod_rev_general"], num_rev)
-            files[sheet_path] = sheet_xml.encode("utf-8")
-            log.append(f"{'✅' if changed else '⚠️ (sin cambio)'} oddHeader '{sname}' → "
-                       f"No. Doc. {re.sub(r'-S\\d+$','',datos['cod_rev_general'])}  Rev. S{num_rev}")
+            new_bytes, changed = actualizar_odd_header(
+                files[spath], datos["cod_rev_general"], num_rev)
+            files[spath] = new_bytes
+            cod_base = re.sub(r"-S\d{2}$", "", datos["cod_rev_general"]).strip()
+            log.append(f"{'✅' if changed else '⚠️ sin cambio'} "
+                       f"Header '{sname}' → No. Doc. {cod_base}  Rev. S{num_rev}")
 
-        # ── Reconstruir xlsx ──────────────────────────────────────────────────
+        # ── Reconstruir ZIP preservando tipos de compresión ───────────────────
         out_buf = io.BytesIO()
-        with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(out_buf, "w") as zout:
             for fname, content in files.items():
-                zout.writestr(fname, content)
+                ct = infos[fname].compress_type if fname in infos else zipfile.ZIP_DEFLATED
+                zout.writestr(fname, content, compress_type=ct)
         out_buf.seek(0)
 
-        st.success("✅ Portada y headers generados")
+        st.success("✅ Portada generada")
         with st.expander("Log detallado"):
-            for line in log:
-                st.text(line)
+            for line in log: st.text(line)
 
         st.download_button(
             label="⬇️ Descargar Excel con portada actualizada",
@@ -264,7 +221,7 @@ if generar and datos and f_plantilla:
             file_name=f"HRC_S{num_rev}_portada.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        st.info("📌 Verifica el header de página (vista Diseño de página en Excel) y el título en la portada. Cuando esté correcto, continuamos.")
+        st.info("📌 Verifica: título en portada y header en Vista → Diseño de página. Cuando esté correcto continuamos.")
 
     except Exception as e:
         st.error(f"Error: {e}")
