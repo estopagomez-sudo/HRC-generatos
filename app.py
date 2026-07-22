@@ -16,14 +16,28 @@ def leer_datos(f):
         return str(val).strip()
     return {
         "num_rev":         v("B2"),   # Número de revisión
-        "titulo_doc":      v("B4"),   # Título del documento
-        "cod_rev_general": v("B5"),   # Código de Revisión General
-        "clave_ref":       v("B6"),   # Clave de referencia
-        "cod_documento":   v("B7"),   # Código del documento
-        "originador":      v("B8"),   # Originador
-        "entidad_rev":     v("B9"),   # Entidad Revisora
-        "revisor_ppal":    v("B10"),  # Revisor principal  ← nuevo
-        "fecha_ciclo":     v("B13"),  # Fecha revisor respondió  ← movida a B13
+        # Portada
+        "titulo_portada":  v("B5"),   # Título portada (CuadroTexto 4 run 3)
+        "tramo_portada":   v("B6"),   # Tramo portada  (CuadroTexto 4 run 2)
+        # Control de firmas
+        "nombre_realizado":v("B9"),
+        "nombre_revisado": v("B10"),
+        "nombre_aprobado": v("B11"),
+        "fecha_firmas":    v("B12"),
+        # Registro de cambios
+        "autor_cambio":    v("B15"),
+        "seccion_afectada":v("B16"),
+        "desc_cambio":     v("B17"),
+        # Cabecera HRC
+        "cod_rev_general": v("B20"),  # F7  + header No.Doc.
+        "clave_ref":       v("B21"),  # F9
+        "titulo_hrc":      v("B22"),  # F10 — distinto al de portada
+        "tramo_hrc":       v("B23"),  # C7  — México-Querétaro-Irapuato...
+        "cod_documento":   v("B24"),  # F11
+        "originador":      v("B25"),  # F12
+        "revisor_ppal":    v("B26"),  # J11
+        "entidad_rev":     v("B27"),  # J12
+        "fecha_ciclo":     v("B30"),  # N11/O11/P11 según ciclo
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,19 +55,33 @@ def get_drawing_path(files, sheet_num):
     match = re.search(r'Type="[^"]*relationships/drawing"[^>]*Target="([^"]+)"', rels)
     return match.group(1).replace("../", "xl/") if match else None
 
-# ── PORTADA ───────────────────────────────────────────────────────────────────
-def actualizar_titulo_portada(drawing_bytes, nuevo_titulo):
+# ── PORTADA: CuadroTexto 4 — run 2 (tramo) y run 3 (título) ─────────────────
+def actualizar_portada(drawing_bytes, titulo, tramo):
     xml   = drawing_bytes.decode("utf-8")
     match = re.search(r'name="CuadroTexto 4".*?</xdr:sp>', xml, re.DOTALL)
     if not match:
-        return drawing_bytes, False, "shape 'CuadroTexto 4' no encontrado"
+        return drawing_bytes, False, "CuadroTexto 4 no encontrado"
     shape  = match.group(0)
     textos = re.findall(r'<a:t>([^<]*)</a:t>', shape)
-    if not textos:
-        return drawing_bytes, False, "no hay runs de texto"
-    titulo_esc  = nuevo_titulo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-    shape_nuevo = shape.replace(f"<a:t>{textos[-1]}</a:t>", f"<a:t>{titulo_esc}</a:t>", 1)
-    return (xml[:match.start()] + shape_nuevo + xml[match.end():]).encode("utf-8"), True, f"'{textos[-1]}' → '{nuevo_titulo}'"
+    if len(textos) < 4:
+        return drawing_bytes, False, f"solo {len(textos)} runs encontrados"
+
+    shape_nuevo = shape
+    # run 2 (índice 2) = tramo
+    if tramo:
+        t_esc = tramo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        shape_nuevo = shape_nuevo.replace(
+            f"<a:t>{textos[2]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
+    # run 3 (índice 3) = título
+    if titulo:
+        t_esc = titulo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        # Reemplazar en shape_nuevo (ya con tramo cambiado)
+        textos_nuevos = re.findall(r'<a:t>([^<]*)</a:t>', shape_nuevo)
+        shape_nuevo = shape_nuevo.replace(
+            f"<a:t>{textos_nuevos[3]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
+
+    xml_nuevo = xml[:match.start()] + shape_nuevo + xml[match.end():]
+    return xml_nuevo.encode("utf-8"), True, f"título='{titulo}' tramo='{tramo}'"
 
 # ── HEADER DE PÁGINA ──────────────────────────────────────────────────────────
 def actualizar_odd_header(sheet_bytes, cod_rev_general, num_rev):
@@ -71,11 +99,7 @@ def actualizar_odd_header(sheet_bytes, cod_rev_general, num_rev):
 def get_shared_strings(files):
     ss_xml = files["xl/sharedStrings.xml"].decode("utf-8")
     items  = re.findall(r'<si>(.*?)</si>', ss_xml, re.DOTALL)
-    shared = []
-    for item in items:
-        texts = re.findall(r'<t[^>]*>([^<]*)</t>', item)
-        shared.append(''.join(texts))
-    return shared
+    return [''.join(re.findall(r'<t[^>]*>([^<]*)</t>', it)) for it in items]
 
 def rebuild_shared_strings(shared):
     items = []
@@ -93,22 +117,20 @@ def rebuild_shared_strings(shared):
 def set_cell_value(sheet_str, shared, cell_ref, new_value):
     idx = len(shared)
     shared.append(str(new_value))
-    # Celda existente con t="s"
     p1 = rf'(<c r="{re.escape(cell_ref)}"[^>]*t="s"[^>]*><v>)\d+(</v></c>)'
     s, n = re.subn(p1, rf'\g<1>{idx}\g<2>', sheet_str)
     if n: return s, shared
-    # Celda existente con otro tipo
     p2 = rf'<c r="{re.escape(cell_ref)}"([^>]*)>.*?</c>'
     def rep(m):
         attrs = re.sub(r'\s*t="[^"]*"', '', m.group(1))
         return f'<c r="{cell_ref}"{attrs} t="s"><v>{idx}</v></c>'
     s, n = re.subn(p2, rep, sheet_str, flags=re.DOTALL)
     if n: return s, shared
-    # Celda no existe — insertar en la fila
     row_num = re.search(r'\d+', cell_ref).group(0)
     p3 = rf'(<row\b[^>]*\br="{row_num}"[^>]*>)(.*?)(</row>)'
     def ins(m):
-        return m.group(1) + m.group(2) + f'<c r="{cell_ref}" t="s"><v>{idx}</v></c>' + m.group(3)
+        return (m.group(1) + m.group(2) +
+                f'<c r="{cell_ref}" t="s"><v>{idx}</v></c>' + m.group(3))
     s, n = re.subn(p3, ins, sheet_str, flags=re.DOTALL)
     if n: return s, shared
     return sheet_str, shared
@@ -126,9 +148,10 @@ def fix_font_color_black(styles_bytes):
 # ── CABECERA HRC ──────────────────────────────────────────────────────────────
 def actualizar_cabecera_hrc(sheet_str, shared, datos, ciclo_col):
     celdas = {
+        'C7':             datos['tramo_hrc'],       # México-Querétaro-Irapuato...
         'F7':             datos['cod_rev_general'],
         'F9':             datos['clave_ref'],
-        'F10':            datos['titulo_doc'],
+        'F10':            datos['titulo_hrc'],       # título específico HRC
         'F11':            datos['cod_documento'],
         'F12':            datos['originador'],
         'J11':            datos['revisor_ppal'],
@@ -163,46 +186,48 @@ if f_datos:
         datos = leer_datos(f_datos)
         st.divider()
         st.subheader("Datos leídos")
-        ca, cb = st.columns([1, 2])
-        labels = ["Revisión","Título doc","Cód. revisión gral","Clave ref",
-                  "Cód. documento","Originador","Entidad revisora",
-                  "Revisor principal","Fecha ciclo"]
-        keys   = ["num_rev","titulo_doc","cod_rev_general","clave_ref",
-                  "cod_documento","originador","entidad_rev",
-                  "revisor_ppal","fecha_ciclo"]
-        with ca:
-            for l in labels: st.markdown(l)
-        with cb:
-            for k in keys:   st.code(datos[k] or "(vacío)")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Portada**")
+            st.code(f"Título:  {datos['titulo_portada'] or '(vacío)'}")
+            st.code(f"Tramo:   {datos['tramo_portada'] or '(vacío)'}")
+            st.markdown("**Cabecera HRC**")
+            st.code(f"Cód. rev:   {datos['cod_rev_general'] or '(vacío)'}")
+            st.code(f"Clave ref:  {datos['clave_ref'] or '(vacío)'}")
+            st.code(f"Título HRC: {datos['titulo_hrc'] or '(vacío)'}")
+            st.code(f"Tramo HRC:  {datos['tramo_hrc'] or '(vacío)'}")
+            st.code(f"Cód. doc:   {datos['cod_documento'] or '(vacío)'}")
+        with col2:
+            st.markdown("**Originador / Revisor**")
+            st.code(f"Originador:  {datos['originador'] or '(vacío)'}")
+            st.code(f"Revisor ppal:{datos['revisor_ppal'] or '(vacío)'}")
+            st.code(f"Entidad rev: {datos['entidad_rev'] or '(vacío)'}")
+            st.markdown("**Ciclo**")
+            st.code(f"Revisión:    {datos['num_rev'] or '(vacío)'}")
+            st.code(f"Fecha ciclo: {datos['fecha_ciclo'] or '(vacío)'}")
     except Exception as e:
         st.error(f"Error leyendo datos_entrada.xlsx: {e}")
 
 st.divider()
-with st.expander("📌 Qué se modifica", expanded=True):
+with st.expander("📌 Qué se modifica", expanded=False):
     st.markdown("""
-**Hoja `1. PORTADA`**
-| Elemento | Campo | Acción |
-|----------|-------|--------|
-| Header de página `No. Doc. / Rev.` | `B5` + `B2` | ✅ |
-| `CuadroTexto 4` — título | `B4` | ✅ |
-
-**Hoja `2. CONTROL DE FIRMAS`**
-| Elemento | Campo | Acción |
-|----------|-------|--------|
-| Header de página `No. Doc. / Rev.` | `B5` + `B2` | ✅ |
-
-**Hojas `HRC_*` (todas las que existan)**
-| Celda | Campo | Acción |
-|-------|-------|--------|
-| `F7` Cód. Revisión General | `B5` | ✅ |
-| `F9` Clave de referencia | `B6` | ✅ |
-| `F10` Título documento | `B4` | ✅ |
-| `F11` Código documento | `B7` | ✅ |
-| `F12` Originador | `B8` | ✅ |
-| `J11` Revisor principal | `B10` | ✅ |
-| `J12` Entidad Revisora | `B9` | ✅ |
-| `N11`/`O11`/`P11` Fecha ciclo | `B13` | ✅ según revisión |
-| Texto en negro | styles.xml font[10] | ✅ |
+| Hoja | Elemento | Campo (datos_entrada) | Celda destino |
+|------|----------|----------------------|---------------|
+| PORTADA | Header No.Doc./Rev. | B20 + B2 | oddHeader |
+| PORTADA | Tramo | B6 | CuadroTexto 4 run 2 |
+| PORTADA | Título | B5 | CuadroTexto 4 run 3 |
+| CONTROL FIRMAS | Header No.Doc./Rev. | B20 + B2 | oddHeader |
+| HRC_* (todas) | Tramo | B23 | C7 |
+| HRC_* (todas) | Cód. revisión gral | B20 | F7 |
+| HRC_* (todas) | Clave referencia | B21 | F9 |
+| HRC_* (todas) | Título HRC | B22 | F10 |
+| HRC_* (todas) | Código documento | B24 | F11 |
+| HRC_* (todas) | Originador | B25 | F12 |
+| HRC_* (todas) | Revisor principal | B26 | J11 |
+| HRC_* (todas) | Entidad Revisora | B27 | J12 |
+| HRC_* (todas) | Fecha ciclo | B30 | N11/O11/P11 |
+| Estilos | Font negro | — | styles.xml font[10] |
 """)
 
 generar = st.button("⚡ Generar",
@@ -218,20 +243,19 @@ if generar and datos and f_plantilla:
 
         sheet_map = get_sheet_map(files)
         num_rev   = datos["num_rev"].zfill(2)
-        # Ciclo: 00→N, 01→O, 02+→P
         ciclo_col = {"00": "N", "01": "O"}.get(num_rev, "P")
         log = []
 
-        # ── 1. CuadroTexto 4 en portada ───────────────────────────────────────
+        # ── 1. Portada: CuadroTexto 4 ─────────────────────────────────────────
         portada = next((s for s in sheet_map if "PORTADA" in s.upper()), None)
         if portada:
             snum  = sheet_map[portada]
             dpath = get_drawing_path(files, snum)
             if dpath and dpath in files:
-                titulo = datos["titulo_doc"]
-                new_bytes, ok, msg = actualizar_titulo_portada(files[dpath], titulo)
+                new_bytes, ok, msg = actualizar_portada(
+                    files[dpath], datos["titulo_portada"], datos["tramo_portada"])
                 files[dpath] = new_bytes
-                log.append(f"{'✅' if ok else '⚠️'} Portada CuadroTexto 4 → {msg}")
+                log.append(f"{'✅' if ok else '⚠️'} Portada drawing → {msg}")
 
         # ── 2. oddHeader en PORTADA y CONTROL DE FIRMAS ───────────────────────
         hojas_hdr = [s for s in sheet_map
@@ -263,9 +287,8 @@ if generar and datos and f_plantilla:
             sheet_str, shared = actualizar_cabecera_hrc(
                 files[spath].decode('utf-8'), shared, datos, ciclo_col)
             files[spath] = sheet_str.encode('utf-8')
-            log.append(f"✅ {sname} → cabecera actualizada (ciclo col {ciclo_col})")
+            log.append(f"✅ {sname} → cabecera actualizada (ciclo {ciclo_col}, col {ciclo_col}11)")
 
-        # Reconstruir sharedStrings
         files["xl/sharedStrings.xml"] = rebuild_shared_strings(shared)
 
         # ── Reconstruir ZIP ───────────────────────────────────────────────────
@@ -276,7 +299,7 @@ if generar and datos and f_plantilla:
                 zout.writestr(fname, content, compress_type=ct)
         out_buf.seek(0)
 
-        st.success(f"✅ Completado — {len(hrc_sheets)} hojas HRC procesadas")
+        st.success(f"✅ Completado — {len(hrc_sheets)} hojas HRC procesadas  |  Revisión S{num_rev}")
         with st.expander("Log detallado"):
             for line in log: st.text(line)
 
