@@ -16,28 +16,19 @@ def leer_datos(f):
         return str(val).strip()
     return {
         "num_rev":         v("B2"),   # Número de revisión
-        # Portada
         "titulo_portada":  v("B5"),   # Título portada (CuadroTexto 4 run 3)
-        "tramo_portada":   v("B6"),   # Tramo portada  (CuadroTexto 4 run 2)
-        # Control de firmas
-        "nombre_realizado":v("B9"),
-        "nombre_revisado": v("B10"),
-        "nombre_aprobado": v("B11"),
-        "fecha_firmas":    v("B12"),
-        # Registro de cambios
-        "autor_cambio":    v("B15"),
-        "seccion_afectada":v("B16"),
-        "desc_cambio":     v("B17"),
-        # Cabecera HRC
-        "cod_rev_general": v("B20"),  # F7  + header No.Doc.
-        "clave_ref":       v("B21"),  # F9
-        "titulo_hrc":      v("B22"),  # F10 — distinto al de portada
-        "tramo_hrc":       v("B23"),  # C7  — México-Querétaro-Irapuato...
-        "cod_documento":   v("B24"),  # F11
-        "originador":      v("B25"),  # F12
-        "revisor_ppal":    v("B26"),  # J11
-        "entidad_rev":     v("B27"),  # J12
-        "fecha_ciclo":     v("B30"),  # N11/O11/P11 según ciclo
+        "autor_cambio":    v("B8"),   # Registro de cambios
+        "seccion_afectada":v("B9"),
+        "desc_cambio":     v("B10"),
+        "cod_rev_general": v("B13"),  # HRC F7 + header No.Doc.
+        "clave_ref":       v("B14"),  # HRC F9
+        "titulo_hrc":      v("B15"),  # HRC F10
+        "tramo_hrc":       v("B16"),  # HRC C7
+        "cod_documento":   v("B17"),  # HRC F11
+        "originador":      v("B18"),  # HRC F12
+        "revisor_ppal":    v("B19"),  # HRC J11
+        "entidad_rev":     v("B20"),  # HRC J12
+        "fecha_ciclo":     v("B23"),  # HRC N11/O11/P11
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,7 +47,8 @@ def get_drawing_path(files, sheet_num):
     return match.group(1).replace("../", "xl/") if match else None
 
 # ── PORTADA: CuadroTexto 4 — run 2 (tramo) y run 3 (título) ─────────────────
-def actualizar_portada(drawing_bytes, titulo, tramo):
+def actualizar_portada(drawing_bytes, titulo):
+    """Solo modifica run 3 (título). El tramo (run 2) no se toca."""
     xml   = drawing_bytes.decode("utf-8")
     match = re.search(r'name="CuadroTexto 4".*?</xdr:sp>', xml, re.DOTALL)
     if not match:
@@ -65,23 +57,12 @@ def actualizar_portada(drawing_bytes, titulo, tramo):
     textos = re.findall(r'<a:t>([^<]*)</a:t>', shape)
     if len(textos) < 4:
         return drawing_bytes, False, f"solo {len(textos)} runs encontrados"
-
-    shape_nuevo = shape
-    # run 2 (índice 2) = tramo
-    if tramo:
-        t_esc = tramo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        shape_nuevo = shape_nuevo.replace(
-            f"<a:t>{textos[2]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
-    # run 3 (índice 3) = título
-    if titulo:
-        t_esc = titulo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        # Reemplazar en shape_nuevo (ya con tramo cambiado)
-        textos_nuevos = re.findall(r'<a:t>([^<]*)</a:t>', shape_nuevo)
-        shape_nuevo = shape_nuevo.replace(
-            f"<a:t>{textos_nuevos[3]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
-
-    xml_nuevo = xml[:match.start()] + shape_nuevo + xml[match.end():]
-    return xml_nuevo.encode("utf-8"), True, f"título='{titulo}' tramo='{tramo}'"
+    if not titulo:
+        return drawing_bytes, False, "título vacío"
+    t_esc       = titulo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    shape_nuevo = shape.replace(f"<a:t>{textos[3]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
+    xml_nuevo   = xml[:match.start()] + shape_nuevo + xml[match.end():]
+    return xml_nuevo.encode("utf-8"), True, f"título='{titulo}'"
 
 # ── HEADER DE PÁGINA ──────────────────────────────────────────────────────────
 def actualizar_odd_header(sheet_bytes, cod_rev_general, num_rev):
@@ -190,8 +171,7 @@ if f_datos:
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Portada**")
-            st.code(f"Título:  {datos['titulo_portada'] or '(vacío)'}")
-            st.code(f"Tramo:   {datos['tramo_portada'] or '(vacío)'}")
+            st.code(f"Título portada: {datos['titulo_portada'] or '(vacío)'}")
             st.markdown("**Cabecera HRC**")
             st.code(f"Cód. rev:   {datos['cod_rev_general'] or '(vacío)'}")
             st.code(f"Clave ref:  {datos['clave_ref'] or '(vacío)'}")
@@ -252,8 +232,7 @@ if generar and datos and f_plantilla:
             snum  = sheet_map[portada]
             dpath = get_drawing_path(files, snum)
             if dpath and dpath in files:
-                new_bytes, ok, msg = actualizar_portada(
-                    files[dpath], datos["titulo_portada"], datos["tramo_portada"])
+                new_bytes, ok, msg = actualizar_portada(files[dpath], datos["titulo_portada"])
                 files[dpath] = new_bytes
                 log.append(f"{'✅' if ok else '⚠️'} Portada drawing → {msg}")
 
