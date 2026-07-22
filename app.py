@@ -18,7 +18,6 @@ def leer_datos(f):
             return val.strftime("%d/%m/%Y")
         s = str(val).strip()
         # Limpiar prefijos de ejemplo que el usuario haya dejado
-        s = re.sub(r"^ej:\s*", "", s, flags=re.IGNORECASE)
         return s
 
     return {
@@ -124,9 +123,7 @@ if f_datos:
             for l in labels: st.markdown(l)
         with cb:
             for k in keys:   st.code(datos[k] or "(vacío)")
-        vacios = [k for k in ["num_rev","titulo_doc","cod_rev_general"] if not datos[k]]
-        if vacios:
-            st.warning(f"⚠️  Campos vacíos: {', '.join(vacios)}")
+
     except Exception as e:
         st.error(f"Error leyendo datos_entrada.xlsx: {e}")
 
