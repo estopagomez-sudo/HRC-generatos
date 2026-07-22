@@ -48,30 +48,44 @@ def get_drawing_path(files, sheet_num):
 
 # ── PORTADA: CuadroTexto 4 — run 2 (tramo) y run 3 (título) ─────────────────
 def actualizar_portada(drawing_bytes, titulo):
-    """Solo modifica run 3 (título). El tramo (run 2) no se toca."""
+    """
+    Modifica el último run de CuadroTexto 4 con el título.
+    Funciona con cualquier número de runs (2, 3, 4...).
+    El tramo (runs anteriores) no se toca.
+    """
     xml   = drawing_bytes.decode("utf-8")
     match = re.search(r'name="CuadroTexto 4".*?</xdr:sp>', xml, re.DOTALL)
     if not match:
         return drawing_bytes, False, "CuadroTexto 4 no encontrado"
     shape  = match.group(0)
     textos = re.findall(r'<a:t>([^<]*)</a:t>', shape)
-    if len(textos) < 4:
-        return drawing_bytes, False, f"solo {len(textos)} runs encontrados"
+    if not textos:
+        return drawing_bytes, False, "no hay runs de texto"
     if not titulo:
         return drawing_bytes, False, "título vacío"
     t_esc       = titulo.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-    shape_nuevo = shape.replace(f"<a:t>{textos[3]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
+    # Reemplazar siempre el ÚLTIMO run — es el título en todos los formatos
+    shape_nuevo = shape.replace(f"<a:t>{textos[-1]}</a:t>", f"<a:t>{t_esc}</a:t>", 1)
     xml_nuevo   = xml[:match.start()] + shape_nuevo + xml[match.end():]
-    return xml_nuevo.encode("utf-8"), True, f"título='{titulo}'"
+    return xml_nuevo.encode("utf-8"), True, f"run[-1] '{textos[-1][:30]}' → '{titulo[:30]}'"
 
 # ── HEADER DE PÁGINA ──────────────────────────────────────────────────────────
 def actualizar_odd_header(sheet_bytes, cod_rev_general, num_rev):
+    """
+    Actualiza No. Doc. y Rev. en el oddHeader.
+    Soporta headers con y sin códigos de color Excel (&KFF0000, &K01+000, etc.)
+    """
     xml_str  = sheet_bytes.decode("utf-8")
     cod_base = re.sub(r"-S\d{2}$", "", cod_rev_general).strip()
     rev_str  = "S" + num_rev.zfill(2)
-    nueva, n = re.subn(
-        r"(No\.[ ]Doc\.[ ])[^\r\n]+(\r\n)(Rev\.[ ])S\d{2}",
-        lambda m: f"{m.group(1)}{cod_base} {m.group(2)}{m.group(3)}{rev_str}",
+    # Patrón que ignora códigos de color opcionales (&amp;KxxxxXX)
+    COLOR = r"(?:&amp;K[0-9A-Fa-f]{6}|&amp;K\d{2}\+\d{3})?"
+    patron = re.compile(
+        rf"(No\.[ ]Doc\.[ ]){COLOR}([^\r\n]+?)(\r\n)"
+        rf"(Rev\.[ ]){COLOR}(S\d{{2}}){COLOR}"
+    )
+    nueva, n = patron.subn(
+        lambda m: f"{m.group(1)}{cod_base}{m.group(3)}{m.group(4)}{rev_str}",
         xml_str
     )
     return nueva.encode("utf-8"), n > 0
